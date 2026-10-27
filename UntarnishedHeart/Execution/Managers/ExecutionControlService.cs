@@ -87,6 +87,8 @@ internal static class ExecutionControlService
         config.SelectedPresetIndex  = matchIndex;
         config.Save();
 
+        ExecutionUIHelper.OpenStatusWindow();
+
         return null;
     }
 
@@ -121,6 +123,8 @@ internal static class ExecutionControlService
         config.CurrentExecutionMode = ExecutionMode.Route;
         config.SelectedRouteIndex   = matchIndex;
         config.Save();
+
+        ExecutionUIHelper.OpenStatusWindow();
 
         return null;
     }
