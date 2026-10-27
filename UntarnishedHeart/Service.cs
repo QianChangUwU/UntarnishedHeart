@@ -29,10 +29,12 @@ public class Service
                                         .ToReadOnlySeString();
         PluginWindow.Init();
         PluginCommand.Init();
+        PluginIPC.Init();
     }
 
     public static void Uninit()
     {
+        PluginIPC.Uninit();
         PluginCommand.Uninit();
         ExecutionManager.Dispose();
         PluginWindow.Uninit();

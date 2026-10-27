@@ -60,5 +60,12 @@ public class PluginConfig : IPluginConfiguration
     (
         ExecuteActionRuntimeCursor? startCursor = null
     ) =>
-        new(RunTimes, LeaderMode, AutoRecommendGear, ContentEntryType, ContentsFinderOption, startCursor);
+        CreatePresetRunOptions(RunTimes, startCursor);
+
+    internal PresetExecutorRunOptions CreatePresetRunOptions
+    (
+        int                         maxRound,
+        ExecuteActionRuntimeCursor? startCursor
+    ) =>
+        new(maxRound, LeaderMode, AutoRecommendGear, ContentEntryType, ContentsFinderOption, startCursor);
 }

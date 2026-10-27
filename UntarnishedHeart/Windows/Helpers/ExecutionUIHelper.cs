@@ -263,7 +263,7 @@ internal static class ExecutionUIHelper
                    $"{runningMessage}\n{REQUEST_MESSAGE}";
     }
 
-    private static unsafe void CancelDutyQueueIfNeeded()
+    internal static unsafe void CancelDutyQueueIfNeeded()
     {
         if (!DService.Instance().Condition[ConditionFlag.InDutyQueue])
             return;
