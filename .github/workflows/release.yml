@@ -1,56 +1,228 @@
-name: Release
+name: Auto release on main push
 
 on:
   push:
-    tags:
-      - '*'
+    branches: [ main ]
+    paths-ignore:
+      - '**/*.md'
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: 'Force create release even if tag exists'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
   contents: write
 
-env:
-  DALAMUD_HOME: ${{ github.workspace }}\dalamud
-
 jobs:
-  build-and-release:
-    runs-on: windows-latest
-
+  detect-version-change:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      should-release: ${{ steps.check-release.outputs.should-release }}
+      tag-exists: ${{ steps.check-tag.outputs.exists }}
     steps:
-      - name: Checkout with submodules
-        uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
-      - name: Setup .NET 10 SDK
-        uses: actions/setup-dotnet@v6
+      - name: Extract version from csproj
+        id: get-version
+        run: |
+          VERSION=$(grep -oP '<Version>\K[^<]+' UntarnishedHeart/UntarnishedHeart.csproj | head -1)
+          if [ -z "$VERSION" ]; then
+            echo "Error: Could not extract version from UntarnishedHeart/UntarnishedHeart.csproj"
+            exit 1
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected version: $VERSION"
+
+      - name: Check if tag already exists
+        id: check-tag
+        run: |
+          TAG="v${{ steps.get-version.outputs.version }}"
+          if git ls-remote --tags origin | grep -q "refs/tags/$TAG$"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag $TAG already exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Tag $TAG does not exist"
+          fi
+
+      - name: Determine if release should be created
+        id: check-release
+        run: |
+          FORCE_RELEASE="${{ github.event.inputs.force_release }}"
+          TAG_EXISTS="${{ steps.check-tag.outputs.exists }}"
+          if [ "$FORCE_RELEASE" = "true" ] || [ "$TAG_EXISTS" = "false" ]; then
+            echo "should-release=true" >> $GITHUB_OUTPUT
+            echo "Will create release"
+          else
+            echo "should-release=false" >> $GITHUB_OUTPUT
+            echo "Will not create release (tag exists and not forced)"
+          fi
+
+  build-and-release:
+    needs: detect-version-change
+    if: needs.detect-version-change.outputs.should-release == 'true'
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.detect-version-change.outputs.version }}
+      DALAMUD_HOME: ${{ github.workspace }}\dalamud
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+
+      - name: Generate changelog
+        id: changelog
+        shell: bash
+        run: |
+          if git describe --tags --abbrev=0 >/dev/null 2>&1; then
+            PREV_TAG=$(git describe --tags --abbrev=0)
+            CHANGELOG=$(git log --pretty=format:'- %s (%h)' "${PREV_TAG}..HEAD")
+          else
+            CHANGELOG=$(git log --pretty=format:'- %s (%h)' -20)
+          fi
+          {
+            echo "changelog<<EOF"
+            echo "$CHANGELOG"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
 
       - name: Download Dalamud runtime
         shell: pwsh
         run: |
           $releases = "https://api.github.com/repos/Dalamud-DailyRoutines/Dalamud/releases/latest"
           $asset = (Invoke-RestMethod $releases).assets | Where-Object { $_.name -eq "latest.7z" }
+          if (-not $asset) {
+            Write-Error "Could not find latest.7z in the Dalamud release"
+            exit 1
+          }
           Write-Host "Downloading $($asset.browser_download_url)"
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$env:RUNNER_TEMP\dalamud.7z"
 
       - name: Extract Dalamud runtime
         shell: pwsh
         run: |
-          mkdir "$env:DALAMUD_HOME" -Force
+          New-Item -ItemType Directory -Path "$env:DALAMUD_HOME" -Force | Out-Null
           & 7z x "$env:RUNNER_TEMP\dalamud.7z" -o"$env:DALAMUD_HOME" -y
 
-      - name: Restore dependencies
-        run: dotnet restore
+      - name: Restore NuGet packages
+        run: dotnet restore UntarnishedHeart.slnx
 
-      - name: Build (Release)
-        run: dotnet build -c Release --no-restore
+      - name: Build project
+        run: dotnet build UntarnishedHeart.slnx -c Release --no-restore
 
-      - name: Create Release
-        run: >
-          gh release create "${{ github.ref_name }}"
-          bin/x64/Release/UntarnishedHeart/latest.zip
-          --title "${{ github.ref_name }}"
-          --verify-tag
+      - name: Prepare artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          $zip = "bin/x64/Release/UntarnishedHeart/latest.zip"
+          $json = "bin/x64/Release/UntarnishedHeart/UntarnishedHeart.json"
+          if (-not (Test-Path $zip)) {
+            Write-Error "latest.zip not found at $zip"
+            exit 1
+          }
+          Copy-Item $zip release/latest.zip
+          if (Test-Path $json) {
+            Copy-Item $json release/UntarnishedHeart.json
+          }
+          Get-ChildItem release | Format-Table Name, Length
+
+      - name: Create and push tag
+        shell: bash
+        run: |
+          TAG="v${VERSION}"
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          if [ "${{ needs.detect-version-change.outputs.tag-exists }}" = "true" ]; then
+            echo "Deleting existing tag $TAG"
+            git tag -d $TAG || true
+            git push origin :refs/tags/$TAG || true
+          fi
+          git tag $TAG -m "Release version ${VERSION}"
+          git push origin $TAG
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: "Untarnished Heart v${{ env.VERSION }}"
+          body: |
+            ## Untarnished Heart v${{ env.VERSION }}
+
+            This release was automatically created following a version bump.
+
+            ### Changes in this release
+            ${{ steps.changelog.outputs.changelog }}
+
+            ### Installation Files
+            - `latest.zip` - **Plugin archive for installation**
+            - `UntarnishedHeart.json` - Plugin manifest
+          files: |
+            release/*
+          draft: false
+          prerelease: false
+
+      - name: Check plugin repo token
+        id: plugin-token
+        shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          PLUGIN_TOKEN: ${{ secrets.PLUGIN_REPO_TOKEN }}
+        run: |
+          if [ -n "$PLUGIN_TOKEN" ]; then
+            echo "has-token=true" >> $GITHUB_OUTPUT
+          else
+            echo "has-token=false" >> $GITHUB_OUTPUT
+            echo "PLUGIN_REPO_TOKEN is not set, skipping pluginmaster update"
+          fi
+
+      - name: Publish to DalamudPlugins repo
+        if: steps.plugin-token.outputs.has-token == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: QianChangUwU/DalamudPlugins
+          token: ${{ secrets.PLUGIN_REPO_TOKEN }}
+          path: dalamud-plugins
+
+      - name: Update pluginmaster.json
+        if: steps.plugin-token.outputs.has-token == 'true'
+        run: |
+          python3 .github/update_pluginmaster.py \
+            dalamud-plugins \
+            "${{ env.VERSION }}" \
+            "${{ github.repository }}"
+
+      - name: Commit and push to DalamudPlugins
+        if: steps.plugin-token.outputs.has-token == 'true'
+        shell: bash
+        run: |
+          cd dalamud-plugins
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add pluginmaster.json
+          git commit -m "Update UntarnishedHeart to v${VERSION}"
+          git push
