@@ -210,8 +210,9 @@ jobs:
 
       - name: Update pluginmaster.json
         if: steps.plugin-token.outputs.has-token == 'true'
+        shell: bash
         run: |
-          python3 .github/update_pluginmaster.py \
+          python .github/update_pluginmaster.py \
             dalamud-plugins \
             "${{ env.VERSION }}" \
             "${{ github.repository }}"
